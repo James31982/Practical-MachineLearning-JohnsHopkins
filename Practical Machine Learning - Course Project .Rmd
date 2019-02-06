@@ -1,0 +1,430 @@
+---
+title: 'Practical Machine Learning Project: HUMAN ACTIVITY RECOGNITION'
+author: "Jaime Paz"
+date: "February 5, 2019"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### 1. SUMMARY
+
+Human Activity Recognition - HAR - has emerged as a key research area in the last years and is gaining increasing attention by the pervasive computing research community, especially for the development of context-aware systems. There are many potential applications for HAR, like: elderly monitoring, life log systems for monitoring energy expenditure and for supporting weight-loss programs, and digital assistants for weight lifting exercises. 
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants.
+
+Data is available and other information is available in: 
+
+http://groupware.les.inf.puc-rio.br/har
+
+
+
+### 2. GOAL OF THE PROJECT
+
+The goal of this project is to predict the manner in which the participants of this experiment did the exercise. For this, we should accomplish the next tasks:
+
+
+#####** Design a Machine Learning Model for predicting the class (A, B, C, D, E) of the human activity dataset (train)**
+
+#####** Once the Machine Learning is built, then we need to predict 20 different test classes of a given dataset (test)**
+
+
+### 3. LOADING PACKAGES AND DATA
+
+
+```{r load-packages, message = FALSE, warning=FALSE}
+
+
+library(caret)
+library(rattle)
+library(rpart.plot)
+library(C50) 
+library(gbm)
+
+
+##LOADING TRAINING DATASET
+
+hr <- read.csv("pml-training.csv", header = TRUE, na.strings=c("NA", "", "#DIV/0!"))
+
+## LOADING TEST DATASET
+
+testdata <- read.csv("pml-testing.csv", header = TRUE, na.strings=c("NA", "", "#DIV/0!"))
+
+
+
+```
+
+#### 4. DATA EXPLORATION (EDA)
+
+Firstly, we start exploring the dataset:
+
+
+```{r}
+str(hr)
+
+```
+
+We should identify the variable which contains the outcome, and dropping those variables without relevant interest. Also, is practical to convert the variable *cvtd_timestamp* into a timestamp object and extracting the year, month, day, weekday, hour and minutes:
+
+
+```{r}
+table(hr$classe)
+
+hr$user_name <- NULL
+hr$X <- NULL
+hr$raw_timestamp_part_1 <- NULL
+hr$raw_timestamp_part_2 <- NULL
+hr$cvtd_timestamp <- strptime(hr$cvtd_timestamp, "%d/%m/%Y %H:%M") 
+
+#extracting years, months, weekdays, hours and minutes
+hr$year <- as.numeric(strftime(hr$cvtd_timestamp, "%Y"))  
+hr$month <- as.numeric(strftime(hr$cvtd_timestamp, "%m"))  
+hr$weekday <- as.numeric(strftime(hr$cvtd_timestamp, "%d"))  
+hr$hour <- as.numeric(strftime(hr$cvtd_timestamp, "%H")) 
+hr$minute <- as.numeric(strftime(hr$cvtd_timestamp, "%M"))
+#dropping the original time
+hr$cvtd_timestamp <- NULL
+```
+
+Fortunately, we can see a nearly balanced classes in the *classe* variable, so this should go well when doing our prediction. 
+
+```{r}
+time <- hr[, c("year", "month", "weekday", "hour", "minute")]
+str(time)
+#year
+table(time$year)
+#month
+table(time$month)
+#weekday
+table(time$weekday)
+#hour
+table(time$hour)
+#minute
+table(time$minute)
+```
+Variable *Year* doesn't seems to any variation across the years. We should investigate later about the others and if they are relevent in our model.
+
+The only issue that we have to overcome, is the variety of imputed **"NAS"** in some variables: 
+
+
+```{r}
+na_count <- function (x) sapply(x, function(y) sum(is.na(y)))
+totalnas <- as.data.frame(na_count(hr))
+totalnas$names <- rownames(totalnas)
+totalnas <- totalnas[which(totalnas$`na_count(hr)` == 0),]
+todrop <- as.vector(rownames(totalnas)) 
+
+#we should keep those variables without NAS
+hr <- hr[, todrop]
+
+#backuping data
+hrdata <- hr
+```
+
+For those variables which will stay in the model, we need to do some diagnosys about those variables which are potentially correlated. For that, we will have two cases:  1) Drop highly correlated variables (> 0.75) and 2) do not drop variables and see the difference.
+
+```{r}
+
+correlated1 <- findCorrelation(cor(hrdata[, -c(1, 55, 56) ]), cutoff = .75, verbose = FALSE)
+
+#CASE 1: Highly correlated variables dropped:
+
+hrdata1 <- hrdata[, correlated1]
+
+#CASE 2: Do not drop variables
+
+hrdata2 <- hrdata
+
+length(colnames(hrdata))
+length(colnames(hrdata1))
+```
+
+We see that CASE 1 has dropped 38 variables and CASE 2 should keep the 60 variables selected. Another thing that we may do is to check if there is any zero covariates in both cases.
+
+```{r}
+nearzero1 <- nearZeroVar(hrdata1)
+nearzero2 <- nearZeroVar(hrdata2)
+
+#covariates with zero variance in case 1
+
+print(nearzero1)
+
+#covariates with zero variance in case 2
+print(nearzero2)
+
+colnames(hrdata2[,c(1, 56)])
+
+```
+Variables "new window" and "year" of model two, seem to be having issues with zero variance, so they might be not good predictors.
+
+```{r}
+#returning classes variables for case 1 and 2
+
+hrdata1$classe <- hrdata$classe
+hrdata2$classe <- hrdata$classe
+
+#drop variables "new window" and "year" from case 2
+
+hrdata2$new_window <- NULL
+hrdata2$year <- NULL
+
+colnames(hrdata1)
+
+```
+
+Inspecting variable distributions:
+
+```{r figbox, fig.height = 10, fig.width = 10}
+
+featurePlot(x=hrdata1[,c(6,10,19,22)],
+            y=hrdata1$classe,
+            plot="density",
+            scales=list(x=list(relation="free"),
+                        y=list(relation="free")),
+            auto.key=list(columns=3), layout=c(3,2))
+```
+
+We might expect that variables should be good predictors using the *classe* variables.
+
+#### 5. PREPARING TRAINING DATA 
+
+First, we will divide the TRAINING SET into two pieces: one for training the model and other for testing the model with known data. *Obsevation: this is not the TEST set given at the beginning. Is a subset of the "train" data itself* 
+
+We will use Cross-Validation for creating two sets (70% for training and 30% for testing set) of data directly from the TRAIN SET:
+
+
+```{r, message=FALSE, warning=FALSE}
+
+#case 1
+
+ind = sample(2, nrow(hrdata1), replace = TRUE, prob=c(0.7, 0.3))
+hrdatatrain1 = hrdata1[ind == 1,]
+hrdatatest1 = hrdata1[ind == 2,]
+
+#case 2
+
+ind = sample(2, nrow(hrdata2), replace = TRUE, prob=c(0.7, 0.3))
+hrdatatrain2 = hrdata2[ind == 1,]
+hrdatatest2 = hrdata2[ind == 2,]
+
+#creating folds for case 1 and 2
+
+k_10_fold = trainControl(method="repeatedcv", number=10, repeats=3)
+
+```
+
+#### 6. BUILDING A DECISION TREE MODEL
+
+First, we will try to build up a machine learning model using a Decision Tree for both cases:
+
+```{r, message=FALSE, warning=FALSE}
+tree_fit1 <- train(factor(classe) ~., data = hrdatatrain1, method = "rpart",
+                   trControl = k_10_fold)
+
+tree_fit2 <- train(factor(classe) ~., data = hrdatatrain2, method = "rpart",
+                   trControl = k_10_fold)
+
+```
+**CASE 1 MODEL**
+
+```{r, message=FALSE, warning=FALSE}
+print(tree_fit1)
+
+```
+
+**CASE 1 MODEL**
+
+```{r, message=FALSE, warning=FALSE}
+print(tree_fit2)
+
+```
+
+#### 7. DECISION TREE - MODEL EVALUATION   
+
+Having both models, we will assess both models and checking the **accuracy:**
+
+**CASE 1 **
+
+```{r}
+
+#TRAINING SET
+
+pred_treetrain1 <-predict(tree_fit1, newdata=hrdatatrain1) 
+t1 <- confusionMatrix(data=pred_treetrain1, hrdatatrain1$classe) 
+t1$table
+t1$overall
+
+#TESTING SET
+
+pred_treetest1 <-predict(tree_fit1, newdata=hrdatatest1) 
+t2 <-  confusionMatrix(data=pred_treetest1, hrdatatest1$classe) 
+
+t2$table
+t2$overall
+```
+
+**CASE 2 **
+
+```{r}
+
+#TRAINING SET
+
+pred_treetrain2 <-predict(tree_fit2, newdata=hrdatatrain2) 
+t3 <- confusionMatrix(data=pred_treetrain2, hrdatatrain2$classe) 
+
+t3$table
+t3$overall
+
+#TESTING SET
+
+pred_treetest2 <-predict(tree_fit2, newdata=hrdatatest2) 
+t4 <- confusionMatrix(data=pred_treetest2, hrdatatest2$classe) 
+
+t4$table
+t4$overall
+
+```
+
+
+Although **Accuracy** slighly improved in case 2 on the **test set ** from 0.4992 to 0.5304, we must remember that this model includes all 60 variables. We will keep with *model 1* approach.  
+
+CHECKING FOR VARIABLE IMPORTANCE:
+
+```{r}
+importance = varImp(tree_fit1, scale=FALSE)
+importance
+```
+
+We still can see some variables that don't add much value to the model. We proceed to drop those variables
+
+
+```{r}
+importance_df <- as.data.frame(varImp(tree_fit1, scale=FALSE)$importance)
+variables_imp <- rownames(subset(importance_df, importance_df$Overall >= 160))
+
+#fitting the model again:
+
+tree_fit1i <- train(factor(classe) ~ accel_arm_x + accel_dumbbell_x +
+                          accel_dumbbell_y + accel_forearm_x + gyros_belt_z +
+                          gyros_dumbbell_y + magnet_arm_x + magnet_belt_y + 
+                          magnet_dumbbell_x + num_window + roll_belt +   
+                          total_accel_dumbbell + yaw_belt  , data =      
+                          hrdatatrain1, method = "rpart",
+                          trControl = k_10_fold)
+
+pred_treetrain1 <-predict(tree_fit1i, newdata=hrdatatrain1) 
+confusionMatrix(data=pred_treetrain1, hrdatatrain1$classe)
+
+pred_treetest2 <-predict(tree_fit1i, newdata=hrdatatest2) 
+confusionMatrix(data=pred_treetest2, hrdatatest2$classe) 
+
+```
+
+We have improved accuracy reducing some variables to Accuracy : 0.5079.
+
+```{r figbox2, fig.height = 7, fig.width = 7}
+
+fancyRpartPlot(tree_fit1i$finalModel, cex = 0.65)
+
+```
+
+
+#### 8. DECISION TREE - MODEL IMPROVEMENT   
+
+Using the boosting method we will use the C.50 package in R for trying to improve the model:
+
+
+```{r}
+
+#include 22 variables of CASE 1:
+
+features <- as.vector(colnames(hrdatatrain1[,c(-3)])) 
+
+fit.c50 <-C5.0(hrdatatrain1[, features], hrdatatrain1[, "classe"],
+                 control =C5.0Control(CF =0.01, minCases =4))
+
+pred_treebagtrain1 <- predict(fit.c50, newdata=hrdatatrain1) 
+t5 <- confusionMatrix(data=pred_treebagtrain1, hrdatatrain1$classe) 
+t5$table
+t5$overall
+
+
+pred_treebagtest1 <-predict(fit.c50, newdata=hrdatatest1) 
+
+t6 <- confusionMatrix(data=pred_treetest1, hrdatatest1$classe)
+t6$table
+t6$overall
+
+```
+
+Although Accuracy has improved on the training set to 0.9818 %, it seems that the improvement doesn't work well on the test set. We will try to improve the model using RANDOM FOREST APPROACH. 
+
+#### 9. RANDOM FOREST - MODEL IMPROVEMENT   
+
+```{r}
+
+rforest.fit <- train(factor(classe) ~., 
+                   data = hrdatatrain1,
+                   method = "parRF",
+                   ntree = 10,
+                   trControl=k_10_fold)
+
+pred_rftrain1 <-predict(rforest.fit , newdata=hrdatatrain1) 
+t7 <- confusionMatrix(data=pred_rftrain1, hrdatatrain1$classe)
+t7$table
+t7$overall
+
+pred_rftest1 <-predict(rforest.fit , newdata=hrdatatest1) 
+
+t8 <- confusionMatrix(data=pred_rftest1, hrdatatest1$classe)
+
+t8$table
+t8$overall
+
+```
+
+```{r figbox3, fig.height = 7, fig.width = 7}
+
+plot(rforest.fit)
+
+```
+
+**Accuracy was improved drastically to 0.9957 % ** so this will be enough to predict on the TEST SET stated in the beginning: 
+
+
+
+```{r}
+
+testcols <- colnames(hrdatatrain1)
+testcols <- testcols[-3]
+testdata <- testdata[, testcols]
+prediction.forest <- predict(rforest.fit , testdata)
+rowstest <- rownames(testdata)
+data <- as.data.frame(rowstest)
+data$predictions <- prediction.forest
+
+data
+
+```
+
+
+#### 10. CONCLUSION
+
+We started in building a model using a *DECISION TREE*. Although we tried to improve its performance, accuracy didn't go well on the training set and causing the training set to be overfitted.
+
+Lastly, we built a *RANDOM FOREST* model using a model with only 22 variables (out of the 60 variables originally). The model improved correctly and we were able to capture the predictions with 100% of success.
+
+
+
+
+
+
+
+
+
+
